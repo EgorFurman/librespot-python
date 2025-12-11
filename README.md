@@ -107,6 +107,24 @@ session = Session.Builder() \
     .create()
 ```
 
+### Use SOCKS5 Proxy
+
+```python
+from librespot.core import Session
+
+# Use socks5h:// for remote DNS resolution (recommended for bypassing geo-blocks)
+# Requires: pip install pysocks
+
+session = Session.Builder() \
+    .set_conf(
+        Session.Configuration.Builder()
+            .set_proxy_url("socks5h://user:pass@host:port")
+            .build()
+    ) \
+    .stored_file("/path/to/credentials.json") \
+    .create()
+```
+
 ### Get Spotify's OAuth token
 
 ```python

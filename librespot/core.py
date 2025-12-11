@@ -18,6 +18,14 @@ import time
 import typing
 import urllib.parse
 
+# SOCKS5 proxy support (optional)
+try:
+    import socks
+    HAS_SOCKS = True
+except ImportError:
+    socks = None
+    HAS_SOCKS = False
+
 import defusedxml.ElementTree
 import requests
 import websocket
@@ -926,7 +934,7 @@ class Session(Closeable, MessageListener, SubListener):
 
     def __init__(self, inner: Inner, address: str) -> None:
         self.__client = Session.create_client(inner.conf)
-        self.connection = Session.ConnectionHolder.create(address, None)
+        self.connection = Session.ConnectionHolder.create(address, inner.conf)
         self.__inner = inner
         self.__keys = DiffieHellman()
         self.logger.info("Created new session! device_id: {}, ap: {}".format(
@@ -1682,14 +1690,8 @@ class Session(Closeable, MessageListener, SubListener):
 
     class Configuration:
         """ """
-        # Proxy
-        # proxyEnabled: bool
-        # proxyType: Proxy.Type
-        # proxyAddress: str
-        # proxyPort: int
-        # proxyAuth: bool
-        # proxyUsername: str
-        # proxyPassword: str
+        # Proxy (socks5://user:pass@host:port or socks5h://host:port for remote DNS)
+        proxy_url: typing.Optional[str]
 
         # Cache
         cache_enabled: bool
@@ -1705,13 +1707,7 @@ class Session(Closeable, MessageListener, SubListener):
 
         def __init__(
             self,
-            # proxy_enabled: bool,
-            # proxy_type: Proxy.Type,
-            # proxy_address: str,
-            # proxy_port: int,
-            # proxy_auth: bool,
-            # proxy_username: str,
-            # proxy_password: str,
+            proxy_url: typing.Optional[str],
             cache_enabled: bool,
             cache_dir: str,
             do_cache_clean_up: bool,
@@ -1719,13 +1715,7 @@ class Session(Closeable, MessageListener, SubListener):
             stored_credentials_file: str,
             retry_on_chunk_error: bool,
         ):
-            # self.proxyEnabled = proxy_enabled
-            # self.proxyType = proxy_type
-            # self.proxyAddress = proxy_address
-            # self.proxyPort = proxy_port
-            # self.proxyAuth = proxy_auth
-            # self.proxyUsername = proxy_username
-            # self.proxyPassword = proxy_password
+            self.proxy_url = proxy_url
             self.cache_enabled = cache_enabled
             self.cache_dir = cache_dir
             self.do_cache_clean_up = do_cache_clean_up
@@ -1735,14 +1725,8 @@ class Session(Closeable, MessageListener, SubListener):
 
         class Builder:
             """ """
-            # Proxy
-            # proxyEnabled: bool = False
-            # proxyType: Proxy.Type = Proxy.Type.DIRECT
-            # proxyAddress: str = None
-            # proxyPort: int = None
-            # proxyAuth: bool = None
-            # proxyUsername: str = None
-            # proxyPassword: str = None
+            # Proxy (socks5://user:pass@host:port or socks5h://host:port)
+            proxy_url: typing.Optional[str] = None
 
             # Cache
             cache_enabled: bool = True
@@ -1757,39 +1741,16 @@ class Session(Closeable, MessageListener, SubListener):
             # Fetching
             retry_on_chunk_error: bool = True
 
-            # def set_proxy_enabled(
-            #         self,
-            #         proxy_enabled: bool) -> Session.Configuration.Builder:
-            #     self.proxyEnabled = proxy_enabled
-            #     return self
-
-            # def set_proxy_type(
-            #         self,
-            #         proxy_type: Proxy.Type) -> Session.Configuration.Builder:
-            #     self.proxyType = proxy_type
-            #     return self
-
-            # def set_proxy_address(
-            #         self, proxy_address: str) -> Session.Configuration.Builder:
-            #     self.proxyAddress = proxy_address
-            #     return self
-
-            # def set_proxy_auth(
-            #         self, proxy_auth: bool) -> Session.Configuration.Builder:
-            #     self.proxyAuth = proxy_auth
-            #     return self
-
-            # def set_proxy_username(
-            #         self,
-            #         proxy_username: str) -> Session.Configuration.Builder:
-            #     self.proxyUsername = proxy_username
-            #     return self
-
-            # def set_proxy_password(
-            #         self,
-            #         proxy_password: str) -> Session.Configuration.Builder:
-            #     self.proxyPassword = proxy_password
-            #     return self
+            def set_proxy_url(
+                    self,
+                    proxy_url: str) -> Session.Configuration.Builder:
+                """Set SOCKS5 proxy URL.
+                
+                :param proxy_url: socks5://user:pass@host:port or socks5h://host:port (h = remote DNS)
+                :returns: Builder
+                """
+                self.proxy_url = proxy_url
+                return self
 
             def set_cache_enabled(
                     self,
@@ -1870,13 +1831,7 @@ class Session(Closeable, MessageListener, SubListener):
 
                 """
                 return Session.Configuration(
-                    # self.proxyEnabled,
-                    # self.proxyType,
-                    # self.proxyAddress,
-                    # self.proxyPort,
-                    # self.proxyAuth,
-                    # self.proxyUsername,
-                    # self.proxyPassword,
+                    self.proxy_url,
                     self.cache_enabled,
                     self.cache_dir,
                     self.do_cache_clean_up,
@@ -1895,19 +1850,63 @@ class Session(Closeable, MessageListener, SubListener):
             self.__socket = sock
 
         @staticmethod
-        def create(address: str, conf) -> Session.ConnectionHolder:
-            """Create the ConnectionHolder instance
+        def create(address: str, conf: typing.Optional[Session.Configuration]) -> Session.ConnectionHolder:
+            """Create the ConnectionHolder instance with optional SOCKS5 proxy support.
+            
+            Proxy is configured via conf.proxy_url.
+            Format: socks5://user:pass@host:port or socks5h://host:port (h = remote DNS)
 
-            :param address: Address to connect
-            :param address: str:
-            :param conf:
+            :param address: Address to connect (host:port)
+            :param conf: Configuration object (optional)
             :returns: ConnectionHolder instance
-
             """
             ap_address = address.split(":")[0]
             ap_port = int(address.split(":")[1])
-            sock = socket.socket()
-            sock.connect((ap_address, ap_port))
+            
+            DEFAULT_TIMEOUT = 30
+            proxy_url = conf.proxy_url if conf else None
+            
+            # No proxy - use regular socket
+            if not proxy_url or not HAS_SOCKS:
+                sock = socket.socket()
+                sock.settimeout(DEFAULT_TIMEOUT)
+                sock.connect((ap_address, ap_port))
+                return Session.ConnectionHolder(sock)
+            
+            # Parse proxy URL
+            if '://' not in proxy_url:
+                proxy_url = f"socks5://{proxy_url}"
+            
+            parsed = urllib.parse.urlparse(proxy_url)
+            scheme = (parsed.scheme or 'socks5').lower()
+            
+            if scheme not in ('socks5', 'socks5h'):
+                raise ValueError(f"Unsupported proxy scheme: {scheme}. Use socks5:// or socks5h://")
+            
+            proxy_host = parsed.hostname
+            proxy_port = parsed.port or 1080
+            proxy_user = parsed.username
+            proxy_pass = parsed.password
+            
+            # socks5h = remote DNS resolution (recommended for bypassing blocks)
+            rdns = (scheme == 'socks5h')
+            
+            sock = socks.socksocket()
+            sock.settimeout(DEFAULT_TIMEOUT)
+            
+            try:
+                sock.set_proxy(
+                    socks.SOCKS5,
+                    proxy_host,
+                    proxy_port,
+                    rdns=rdns,
+                    username=proxy_user,
+                    password=proxy_pass
+                )
+                sock.connect((ap_address, ap_port))
+            except (socks.ProxyError, socket.error, OSError) as e:
+                raise ConnectionError(f"Failed to connect via SOCKS5 proxy {proxy_host}:{proxy_port} -> {ap_address}:{ap_port}: {e}")
+            
             return Session.ConnectionHolder(sock)
 
         def close(self) -> None:
